@@ -72,8 +72,8 @@ impl fmt::Debug for Memo {
 impl Default for Memo {
     fn default() -> Self {
         // Empty memo field indication per ZIP 302
-        let mut memo = [0u8; 512];
-        memo[0] = 0xF6;
+        let memo = [0u8; 512];
+        // memo[0] = 0xF6; // TRON use UTF8/HEX encoding for memo
         Memo(memo)
     }
 }
