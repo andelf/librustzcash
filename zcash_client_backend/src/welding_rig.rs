@@ -4,7 +4,7 @@ use ff::PrimeField;
 use std::collections::HashSet;
 use subtle::{ConditionallySelectable, ConstantTimeEq, CtOption};
 use zcash_primitives::{
-    jubjub::fs::Fs,
+    consensus::{self, BlockHeight},
     merkle_tree::{CommitmentTree, IncrementalWitness},
     note_encryption::try_sapling_compact_note_decryption,
     sapling::Node,
@@ -22,9 +22,11 @@ use crate::wallet::{WalletShieldedOutput, WalletShieldedSpend, WalletTx};
 ///
 /// The given [`CommitmentTree`] and existing [`IncrementalWitness`]es are incremented
 /// with this output's commitment.
-fn scan_output(
+fn scan_output<P: consensus::Parameters>(
+    params: &P,
+    height: BlockHeight,
     (index, output): (usize, CompactOutput),
-    ivks: &[Fs],
+    ivks: &[jubjub::Fr],
     spent_from_accounts: &HashSet<usize>,
     tree: &mut CommitmentTree<Node>,
     existing_witnesses: &mut [&mut IncrementalWitness<Node>],
@@ -49,10 +51,11 @@ fn scan_output(
     tree.append(node).unwrap();
 
     for (account, ivk) in ivks.iter().enumerate() {
-        let (note, to) = match try_sapling_compact_note_decryption(ivk, &epk, &cmu, &ct) {
-            Some(ret) => ret,
-            None => continue,
-        };
+        let (note, to) =
+            match try_sapling_compact_note_decryption(params, height, ivk, &epk, &cmu, &ct) {
+                Some(ret) => ret,
+                None => continue,
+            };
 
         // A note is marked as "change" if the account that received it
         // also spent notes in the same transaction. This will catch,
@@ -83,7 +86,8 @@ fn scan_output(
 ///
 /// The given [`CommitmentTree`] and existing [`IncrementalWitness`]es are
 /// incremented appropriately.
-pub fn scan_block(
+pub fn scan_block<P: consensus::Parameters>(
+    params: &P,
     block: CompactBlock,
     extfvks: &[ExtendedFullViewingKey],
     nullifiers: &[(&[u8], usize)],
@@ -92,6 +96,7 @@ pub fn scan_block(
 ) -> Vec<WalletTx> {
     let mut wtxs: Vec<WalletTx> = vec![];
     let ivks: Vec<_> = extfvks.iter().map(|extfvk| extfvk.fvk.vk.ivk()).collect();
+    let block_height = block.height();
 
     for tx in block.vtx.into_iter() {
         let num_spends = tx.spends.len();
@@ -151,6 +156,8 @@ pub fn scan_block(
                     .collect();
 
                 if let Some(output) = scan_output(
+                    params,
+                    block_height,
                     to_scan,
                     &ivks,
                     &spent_from_accounts,
@@ -184,41 +191,38 @@ pub fn scan_block(
 #[cfg(test)]
 mod tests {
     use ff::{Field, PrimeField};
-    use pairing::bls12_381::{Bls12, Fr};
+    use group::GroupEncoding;
     use rand_core::{OsRng, RngCore};
     use zcash_primitives::{
-        jubjub::{fs::Fs, FixedGenerators, JubjubParams, ToUniform},
+        consensus::{BlockHeight, Network},
+        constants::SPENDING_KEY_GENERATOR,
         merkle_tree::CommitmentTree,
         note_encryption::{Memo, SaplingNoteEncryption},
         primitives::Note,
         transaction::components::Amount,
+        util::generate_random_rseed,
         zip32::{ExtendedFullViewingKey, ExtendedSpendingKey},
-        JUBJUB,
     };
 
     use super::scan_block;
     use crate::proto::compact_formats::{CompactBlock, CompactOutput, CompactSpend, CompactTx};
 
-    fn random_compact_tx<R: RngCore>(rng: &mut R) -> CompactTx {
+    fn random_compact_tx(mut rng: impl RngCore) -> CompactTx {
         let fake_nf = {
             let mut nf = vec![0; 32];
             rng.fill_bytes(&mut nf);
             nf
         };
         let fake_cmu = {
-            let fake_cmu = Fr::random(rng);
+            let fake_cmu = bls12_381::Scalar::random(&mut rng);
             fake_cmu.to_repr().as_ref().to_owned()
         };
         let fake_epk = {
-            let mut buffer = vec![0; 64];
+            let mut buffer = [0; 64];
             rng.fill_bytes(&mut buffer);
-            let fake_esk = Fs::to_uniform(&buffer[..]);
-            let fake_epk = JUBJUB
-                .generator(FixedGenerators::SpendingKeyGenerator)
-                .mul(fake_esk, &JUBJUB);
-            let mut bytes = vec![];
-            fake_epk.write(&mut bytes).unwrap();
-            bytes
+            let fake_esk = jubjub::Fr::from_bytes_wide(&buffer);
+            let fake_epk = SPENDING_KEY_GENERATOR * fake_esk;
+            fake_epk.to_bytes().to_vec()
         };
         let mut cspend = CompactSpend::new();
         cspend.set_nf(fake_nf);
@@ -239,7 +243,7 @@ mod tests {
     /// single spend of the given nullifier and a single output paying the given address.
     /// Returns the CompactBlock.
     fn fake_compact_block(
-        height: i32,
+        height: BlockHeight,
         nf: [u8; 32],
         extfvk: ExtendedFullViewingKey,
         value: Amount,
@@ -249,27 +253,27 @@ mod tests {
 
         // Create a fake Note for the account
         let mut rng = OsRng;
+        let rseed = generate_random_rseed(&Network::TestNetwork, height, &mut rng);
         let note = Note {
-            g_d: to.diversifier().g_d::<Bls12>(&JUBJUB).unwrap(),
+            g_d: to.diversifier().g_d().unwrap(),
             pk_d: to.pk_d().clone(),
             value: value.into(),
-            r: Fs::random(&mut rng),
+            rseed,
         };
         let encryptor = SaplingNoteEncryption::new(
-            extfvk.fvk.ovk,
+            Some(extfvk.fvk.ovk),
             note.clone(),
             to.clone(),
             Memo::default(),
             &mut rng,
         );
-        let cmu = note.cm(&JUBJUB).to_repr().as_ref().to_owned();
-        let mut epk = vec![];
-        encryptor.epk().write(&mut epk).unwrap();
+        let cmu = note.cmu().to_repr().as_ref().to_owned();
+        let epk = encryptor.epk().to_bytes().to_vec();
         let enc_ciphertext = encryptor.encrypt_note_plaintext();
 
         // Create a fake CompactBlock containing the note
         let mut cb = CompactBlock::new();
-        cb.set_height(height as u64);
+        cb.set_height(height.into());
 
         // Add a random Sapling tx before ours
         {
@@ -309,7 +313,7 @@ mod tests {
         let extfvk = ExtendedFullViewingKey::from(&extsk);
 
         let cb = fake_compact_block(
-            1,
+            1u32.into(),
             [0; 32],
             extfvk.clone(),
             Amount::from_u64(5).unwrap(),
@@ -318,7 +322,14 @@ mod tests {
         assert_eq!(cb.vtx.len(), 2);
 
         let mut tree = CommitmentTree::new();
-        let txs = scan_block(cb, &[extfvk], &[], &mut tree, &mut []);
+        let txs = scan_block(
+            &Network::TestNetwork,
+            cb,
+            &[extfvk],
+            &[],
+            &mut tree,
+            &mut [],
+        );
         assert_eq!(txs.len(), 1);
 
         let tx = &txs[0];
@@ -341,7 +352,7 @@ mod tests {
         let extfvk = ExtendedFullViewingKey::from(&extsk);
 
         let cb = fake_compact_block(
-            1,
+            1u32.into(),
             [0; 32],
             extfvk.clone(),
             Amount::from_u64(5).unwrap(),
@@ -350,7 +361,14 @@ mod tests {
         assert_eq!(cb.vtx.len(), 3);
 
         let mut tree = CommitmentTree::new();
-        let txs = scan_block(cb, &[extfvk], &[], &mut tree, &mut []);
+        let txs = scan_block(
+            &Network::TestNetwork,
+            cb,
+            &[extfvk],
+            &[],
+            &mut tree,
+            &mut [],
+        );
         assert_eq!(txs.len(), 1);
 
         let tx = &txs[0];
@@ -374,11 +392,18 @@ mod tests {
         let nf = [7; 32];
         let account = 12;
 
-        let cb = fake_compact_block(1, nf, extfvk, Amount::from_u64(5).unwrap(), false);
+        let cb = fake_compact_block(1u32.into(), nf, extfvk, Amount::from_u64(5).unwrap(), false);
         assert_eq!(cb.vtx.len(), 2);
 
         let mut tree = CommitmentTree::new();
-        let txs = scan_block(cb, &[], &[(&nf, account)], &mut tree, &mut []);
+        let txs = scan_block(
+            &Network::TestNetwork,
+            cb,
+            &[],
+            &[(&nf, account)],
+            &mut tree,
+            &mut [],
+        );
         assert_eq!(txs.len(), 1);
 
         let tx = &txs[0];

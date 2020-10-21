@@ -1,23 +1,21 @@
 //! Abstractions over the proving system and parameters for ease of use.
 
 use bellman::groth16::{Parameters, PreparedVerifyingKey};
-use directories::BaseDirs;
-use pairing::bls12_381::{Bls12, Fr};
+use bls12_381::Bls12;
 use std::path::Path;
 use zcash_primitives::{
-    jubjub::{edwards, fs::Fs, Unknown},
-    primitives::{Diversifier, PaymentAddress, ProofGenerationKey},
-};
-use zcash_primitives::{
     merkle_tree::MerklePath,
+    primitives::{Diversifier, PaymentAddress, ProofGenerationKey, Rseed},
     prover::TxProver,
     redjubjub::{PublicKey, Signature},
     sapling::Node,
     transaction::components::{Amount, GROTH_PROOF_SIZE},
-    JUBJUB,
 };
 
-use crate::{load_parameters, sapling::SaplingProvingContext};
+use crate::{load_parameters, parse_parameters, sapling::SaplingProvingContext};
+
+#[cfg(feature = "local-prover")]
+use crate::{default_params_folder, SAPLING_OUTPUT_NAME, SAPLING_SPEND_NAME};
 
 /// An implementation of [`TxProver`] using Sapling Spend and Output parameters from
 /// locally-accessible paths.
@@ -56,6 +54,32 @@ impl LocalTxProver {
         }
     }
 
+    /// Creates a `LocalTxProver` using parameters specified as byte arrays.
+    ///
+    /// # Examples
+    ///
+    /// ```should_panic
+    /// use std::path::Path;
+    /// use zcash_proofs::prover::LocalTxProver;
+    ///
+    /// let tx_prover = LocalTxProver::from_bytes(&[0u8], &[0u8]);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the byte arrays do not contain valid parameters with
+    /// the expected hashes.
+    pub fn from_bytes(spend_param_bytes: &[u8], output_param_bytes: &[u8]) -> Self {
+        let (spend_params, spend_vk, output_params, _, _) =
+            parse_parameters(spend_param_bytes, output_param_bytes, None);
+
+        LocalTxProver {
+            spend_params,
+            spend_vk,
+            output_params,
+        }
+    }
+
     /// Attempts to create a `LocalTxProver` using parameters from the default local
     /// location.
     ///
@@ -77,19 +101,14 @@ impl LocalTxProver {
     ///
     /// This function will panic if the parameters in the default local location do not
     /// have the expected hashes.
+    #[cfg(feature = "local-prover")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "local-prover")))]
     pub fn with_default_location() -> Option<Self> {
-        let base_dirs = BaseDirs::new()?;
-        let unix_params_dir = base_dirs.home_dir().join(".zcash-params");
-        let win_osx_params_dir = base_dirs.data_dir().join("ZcashParams");
-        let (spend_path, output_path) = if unix_params_dir.exists() {
+        let params_dir = default_params_folder()?;
+        let (spend_path, output_path) = if params_dir.exists() {
             (
-                unix_params_dir.join("sapling-spend.params"),
-                unix_params_dir.join("sapling-output.params"),
-            )
-        } else if win_osx_params_dir.exists() {
-            (
-                win_osx_params_dir.join("sapling-spend.params"),
-                win_osx_params_dir.join("sapling-output.params"),
+                params_dir.join(SAPLING_SPEND_NAME),
+                params_dir.join(SAPLING_OUTPUT_NAME),
             )
         } else {
             return None;
@@ -99,6 +118,24 @@ impl LocalTxProver {
         }
 
         Some(LocalTxProver::new(&spend_path, &output_path))
+    }
+
+    /// Creates a `LocalTxProver` using Sapling parameters bundled inside the binary.
+    ///
+    /// This requires the `bundled-prover` feature, which will increase the binary size by
+    /// around 50 MiB.
+    #[cfg(feature = "bundled-prover")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "bundled-prover")))]
+    pub fn bundled() -> Self {
+        let (spend_buf, output_buf) = wagyu_zcash_parameters::load_sapling_parameters();
+        let (spend_params, spend_vk, output_params, _, _) =
+            parse_parameters(&spend_buf[..], &output_buf[..], None);
+
+        LocalTxProver {
+            spend_params,
+            spend_vk,
+            output_params,
+        }
     }
 }
 
@@ -112,32 +149,24 @@ impl TxProver for LocalTxProver {
     fn spend_proof(
         &self,
         ctx: &mut Self::SaplingProvingContext,
-        proof_generation_key: ProofGenerationKey<Bls12>,
+        proof_generation_key: ProofGenerationKey,
         diversifier: Diversifier,
-        rcm: Fs,
-        ar: Fs,
+        rseed: Rseed,
+        ar: jubjub::Fr,
         value: u64,
-        anchor: Fr,
+        anchor: bls12_381::Scalar,
         merkle_path: MerklePath<Node>,
-    ) -> Result<
-        (
-            [u8; GROTH_PROOF_SIZE],
-            edwards::Point<Bls12, Unknown>,
-            PublicKey<Bls12>,
-        ),
-        (),
-    > {
+    ) -> Result<([u8; GROTH_PROOF_SIZE], jubjub::ExtendedPoint, PublicKey), ()> {
         let (proof, cv, rk) = ctx.spend_proof(
             proof_generation_key,
             diversifier,
-            rcm,
+            rseed,
             ar,
             value,
             anchor,
             merkle_path,
             &self.spend_params,
             &self.spend_vk,
-            &JUBJUB,
         )?;
 
         let mut zkproof = [0u8; GROTH_PROOF_SIZE];
@@ -151,19 +180,12 @@ impl TxProver for LocalTxProver {
     fn output_proof(
         &self,
         ctx: &mut Self::SaplingProvingContext,
-        esk: Fs,
-        payment_address: PaymentAddress<Bls12>,
-        rcm: Fs,
+        esk: jubjub::Fr,
+        payment_address: PaymentAddress,
+        rcm: jubjub::Fr,
         value: u64,
-    ) -> ([u8; GROTH_PROOF_SIZE], edwards::Point<Bls12, Unknown>) {
-        let (proof, cv) = ctx.output_proof(
-            esk,
-            payment_address,
-            rcm,
-            value,
-            &self.output_params,
-            &JUBJUB,
-        );
+    ) -> ([u8; GROTH_PROOF_SIZE], jubjub::ExtendedPoint) {
+        let (proof, cv) = ctx.output_proof(esk, payment_address, rcm, value, &self.output_params);
 
         let mut zkproof = [0u8; GROTH_PROOF_SIZE];
         proof
@@ -179,6 +201,6 @@ impl TxProver for LocalTxProver {
         value_balance: Amount,
         sighash: &[u8; 32],
     ) -> Result<Signature, ()> {
-        ctx.binding_sig(value_balance, sighash, &JUBJUB)
+        ctx.binding_sig(value_balance, sighash)
     }
 }

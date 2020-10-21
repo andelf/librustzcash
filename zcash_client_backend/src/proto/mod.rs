@@ -1,11 +1,12 @@
 //! Generated code for handling light client protobuf structs.
 
 use ff::PrimeField;
-use pairing::bls12_381::{Bls12, Fr, FrRepr};
+use group::GroupEncoding;
+use std::convert::TryInto;
+
 use zcash_primitives::{
     block::{BlockHash, BlockHeader},
-    jubjub::{edwards, PrimeOrder},
-    JUBJUB,
+    consensus::BlockHeight,
 };
 
 pub mod compact_formats;
@@ -57,6 +58,15 @@ impl compact_formats::CompactBlock {
             BlockHeader::read(&self.header[..]).ok()
         }
     }
+
+    /// Returns the [`BlockHeight`] for this block.
+    ///
+    /// A convenience method that wraps [`CompactBlock.height`]
+    ///
+    /// [`CompactBlock.height`]: #structfield.height
+    pub fn height(&self) -> BlockHeight {
+        BlockHeight::from(self.height)
+    }
 }
 
 impl compact_formats::CompactOutput {
@@ -65,10 +75,10 @@ impl compact_formats::CompactOutput {
     /// A convenience method that parses [`CompactOutput.cmu`].
     ///
     /// [`CompactOutput.cmu`]: #structfield.cmu
-    pub fn cmu(&self) -> Result<Fr, ()> {
-        let mut repr = FrRepr::default();
+    pub fn cmu(&self) -> Result<bls12_381::Scalar, ()> {
+        let mut repr = [0; 32];
         repr.as_mut().copy_from_slice(&self.cmu[..]);
-        Fr::from_repr(repr).ok_or(())
+        bls12_381::Scalar::from_repr(repr).ok_or(())
     }
 
     /// Returns the ephemeral public key for this output.
@@ -76,8 +86,12 @@ impl compact_formats::CompactOutput {
     /// A convenience method that parses [`CompactOutput.epk`].
     ///
     /// [`CompactOutput.epk`]: #structfield.epk
-    pub fn epk(&self) -> Result<edwards::Point<Bls12, PrimeOrder>, ()> {
-        let p = edwards::Point::<Bls12, _>::read(&self.epk[..], &JUBJUB).map_err(|_| ())?;
-        p.as_prime_order(&JUBJUB).ok_or(())
+    pub fn epk(&self) -> Result<jubjub::ExtendedPoint, ()> {
+        let p = jubjub::ExtendedPoint::from_bytes(&self.epk[..].try_into().map_err(|_| ())?);
+        if p.is_some().into() {
+            Ok(p.unwrap())
+        } else {
+            Err(())
+        }
     }
 }

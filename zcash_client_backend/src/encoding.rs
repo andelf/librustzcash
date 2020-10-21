@@ -1,20 +1,18 @@
 //! Encoding and decoding functions for Zcash key and address structs.
 //!
-//! Human-Readable Prefixes (HRPs) for Bech32 encodings are located in the [`constants`]
+//! Human-Readable Prefixes (HRPs) for Bech32 encodings are located in the [`zcash_primitives::constants`]
 //! module.
 //!
-//! [`constants`]: crate::constants
+//! [`constants`]: zcash_primitives::constants
 
 use bech32::{self, Error, FromBase32, ToBase32};
 use bs58::{self, decode::Error as Bs58Error};
-use pairing::bls12_381::Bls12;
 use std::convert::TryInto;
 use std::io::{self, Write};
 use zcash_primitives::{
     legacy::TransparentAddress,
     primitives::PaymentAddress,
     zip32::{ExtendedFullViewingKey, ExtendedSpendingKey},
-    JUBJUB,
 };
 
 fn bech32_encode<F>(hrp: &str, write: F) -> String
@@ -43,8 +41,10 @@ where
 /// # Examples
 ///
 /// ```
-/// use zcash_client_backend::{
+/// use zcash_primitives::{
 ///     constants::testnet::{COIN_TYPE, HRP_SAPLING_EXTENDED_SPENDING_KEY},
+/// };
+/// use zcash_client_backend::{
 ///     encoding::encode_extended_spending_key,
 ///     keys::spending_key,
 /// };
@@ -69,8 +69,10 @@ pub fn decode_extended_spending_key(
 /// # Examples
 ///
 /// ```
-/// use zcash_client_backend::{
+/// use zcash_primitives::{
 ///     constants::testnet::{COIN_TYPE, HRP_SAPLING_EXTENDED_FULL_VIEWING_KEY},
+/// };
+/// use zcash_client_backend::{
 ///     encoding::encode_extended_full_viewing_key,
 ///     keys::spending_key,
 /// };
@@ -97,17 +99,16 @@ pub fn decode_extended_full_viewing_key(
 /// # Examples
 ///
 /// ```
-/// use pairing::bls12_381::Bls12;
+/// use group::Group;
+/// use jubjub::SubgroupPoint;
 /// use rand_core::SeedableRng;
 /// use rand_xorshift::XorShiftRng;
 /// use zcash_client_backend::{
-///     constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
 ///     encoding::encode_payment_address,
 /// };
 /// use zcash_primitives::{
-///     jubjub::edwards,
+///     constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
 ///     primitives::{Diversifier, PaymentAddress},
-///     JUBJUB,
 /// };
 ///
 /// let rng = &mut XorShiftRng::from_seed([
@@ -117,16 +118,16 @@ pub fn decode_extended_full_viewing_key(
 ///
 /// let pa = PaymentAddress::from_parts(
 ///     Diversifier([0u8; 11]),
-///     edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
+///     SubgroupPoint::random(rng),
 /// )
 /// .unwrap();
 ///
 /// assert_eq!(
 ///     encode_payment_address(HRP_SAPLING_PAYMENT_ADDRESS, &pa),
-///     "ztestsapling1qqqqqqqqqqqqqqqqqrjq05nyfku05msvu49mawhg6kr0wwljahypwyk2h88z6975u563j0ym7pe",
+///     "ztestsapling1qqqqqqqqqqqqqqqqqqcguyvaw2vjk4sdyeg0lc970u659lvhqq7t0np6hlup5lusxle75ss7jnk",
 /// );
 /// ```
-pub fn encode_payment_address(hrp: &str, addr: &PaymentAddress<Bls12>) -> String {
+pub fn encode_payment_address(hrp: &str, addr: &PaymentAddress) -> String {
     bech32_encode(hrp, |w| w.write_all(&addr.to_bytes()))
 }
 
@@ -135,17 +136,16 @@ pub fn encode_payment_address(hrp: &str, addr: &PaymentAddress<Bls12>) -> String
 /// # Examples
 ///
 /// ```
-/// use pairing::bls12_381::Bls12;
+/// use group::Group;
+/// use jubjub::SubgroupPoint;
 /// use rand_core::SeedableRng;
 /// use rand_xorshift::XorShiftRng;
 /// use zcash_client_backend::{
-///     constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
 ///     encoding::decode_payment_address,
 /// };
 /// use zcash_primitives::{
-///     jubjub::edwards,
+///     constants::testnet::HRP_SAPLING_PAYMENT_ADDRESS,
 ///     primitives::{Diversifier, PaymentAddress},
-///     JUBJUB,
 /// };
 ///
 /// let rng = &mut XorShiftRng::from_seed([
@@ -155,19 +155,19 @@ pub fn encode_payment_address(hrp: &str, addr: &PaymentAddress<Bls12>) -> String
 ///
 /// let pa = PaymentAddress::from_parts(
 ///     Diversifier([0u8; 11]),
-///     edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
+///     SubgroupPoint::random(rng),
 /// )
 /// .unwrap();
 ///
 /// assert_eq!(
 ///     decode_payment_address(
 ///         HRP_SAPLING_PAYMENT_ADDRESS,
-///         "ztestsapling1qqqqqqqqqqqqqqqqqrjq05nyfku05msvu49mawhg6kr0wwljahypwyk2h88z6975u563j0ym7pe",
+///         "ztestsapling1qqqqqqqqqqqqqqqqqqcguyvaw2vjk4sdyeg0lc970u659lvhqq7t0np6hlup5lusxle75ss7jnk",
 ///     ),
 ///     Ok(Some(pa)),
 /// );
 /// ```
-pub fn decode_payment_address(hrp: &str, s: &str) -> Result<Option<PaymentAddress<Bls12>>, Error> {
+pub fn decode_payment_address(hrp: &str, s: &str) -> Result<Option<PaymentAddress>, Error> {
     bech32_decode(hrp, s, |data| {
         if data.len() != 43 {
             return None;
@@ -175,7 +175,7 @@ pub fn decode_payment_address(hrp: &str, s: &str) -> Result<Option<PaymentAddres
 
         let mut bytes = [0; 43];
         bytes.copy_from_slice(&data);
-        PaymentAddress::<Bls12>::from_bytes(&bytes, &JUBJUB)
+        PaymentAddress::from_bytes(&bytes)
     })
 }
 
@@ -185,10 +185,12 @@ pub fn decode_payment_address(hrp: &str, s: &str) -> Result<Option<PaymentAddres
 ///
 /// ```
 /// use zcash_client_backend::{
-///     constants::testnet::{B58_PUBKEY_ADDRESS_PREFIX, B58_SCRIPT_ADDRESS_PREFIX},
 ///     encoding::encode_transparent_address,
 /// };
-/// use zcash_primitives::legacy::TransparentAddress;
+/// use zcash_primitives::{
+///     constants::testnet::{B58_PUBKEY_ADDRESS_PREFIX, B58_SCRIPT_ADDRESS_PREFIX},
+///     legacy::TransparentAddress,
+/// };
 ///
 /// assert_eq!(
 ///     encode_transparent_address(
@@ -235,8 +237,10 @@ pub fn encode_transparent_address(
 /// # Examples
 ///
 /// ```
-/// use zcash_client_backend::{
+/// use zcash_primitives::{
 ///     constants::testnet::{B58_PUBKEY_ADDRESS_PREFIX, B58_SCRIPT_ADDRESS_PREFIX},
+/// };
+/// use zcash_client_backend::{
 ///     encoding::decode_transparent_address,
 /// };
 /// use zcash_primitives::legacy::TransparentAddress;
@@ -283,12 +287,11 @@ pub fn decode_transparent_address(
 
 #[cfg(test)]
 mod tests {
-    use pairing::bls12_381::Bls12;
+    use group::Group;
     use rand_core::SeedableRng;
     use rand_xorshift::XorShiftRng;
-    use zcash_primitives::JUBJUB;
     use zcash_primitives::{
-        jubjub::edwards,
+        constants,
         primitives::{Diversifier, PaymentAddress},
         zip32::ExtendedSpendingKey,
     };
@@ -297,7 +300,6 @@ mod tests {
         decode_extended_full_viewing_key, decode_extended_spending_key, decode_payment_address,
         encode_extended_full_viewing_key, encode_extended_spending_key, encode_payment_address,
     };
-    use crate::constants;
 
     #[test]
     fn extended_spending_key() {
@@ -386,16 +388,14 @@ mod tests {
             0xbc, 0xe5,
         ]);
 
-        let addr = PaymentAddress::from_parts(
-            Diversifier([0u8; 11]),
-            edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
-        )
-        .unwrap();
+        let addr =
+            PaymentAddress::from_parts(Diversifier([0u8; 11]), jubjub::SubgroupPoint::random(rng))
+                .unwrap();
 
         let encoded_main =
-            "zs1qqqqqqqqqqqqqqqqqrjq05nyfku05msvu49mawhg6kr0wwljahypwyk2h88z6975u563j8nfaxd";
+            "zs1qqqqqqqqqqqqqqqqqqcguyvaw2vjk4sdyeg0lc970u659lvhqq7t0np6hlup5lusxle75c8v35z";
         let encoded_test =
-            "ztestsapling1qqqqqqqqqqqqqqqqqrjq05nyfku05msvu49mawhg6kr0wwljahypwyk2h88z6975u563j0ym7pe";
+            "ztestsapling1qqqqqqqqqqqqqqqqqqcguyvaw2vjk4sdyeg0lc970u659lvhqq7t0np6hlup5lusxle75ss7jnk";
 
         assert_eq!(
             encode_payment_address(constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS, &addr),
@@ -431,11 +431,9 @@ mod tests {
             0xbc, 0xe5,
         ]);
 
-        let addr = PaymentAddress::from_parts(
-            Diversifier([1u8; 11]),
-            edwards::Point::<Bls12, _>::rand(rng, &JUBJUB).mul_by_cofactor(&JUBJUB),
-        )
-        .unwrap();
+        let addr =
+            PaymentAddress::from_parts(Diversifier([1u8; 11]), jubjub::SubgroupPoint::random(rng))
+                .unwrap();
 
         let encoded_main =
             encode_payment_address(constants::mainnet::HRP_SAPLING_PAYMENT_ADDRESS, &addr);
